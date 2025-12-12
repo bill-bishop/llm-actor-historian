@@ -496,7 +496,7 @@ app.post("/api/session/:id/user-turn", async (req, res) => {
       stepToolResults.find((r) => r.kind === "validation_result") ||
       makeValidationResult(
         "actor",
-        lastValidationOutcome || { ok: true },
+        (lastValidationOutcome && { ...lastValidationOutcome, errors: lastValidationOutcome.errors ?? [] }) || { ok: true, errors: [] },
         "No explicit validation_result recorded."
       );
 
