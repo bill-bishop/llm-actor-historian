@@ -1,4 +1,3 @@
-
 import * as fs from "fs";
 import * as path from "path";
 
@@ -22,6 +21,7 @@ import {
   runHistorianUpdate,
 } from "./orchestrator";
 import { OpenAIAdapter } from "./openAIAdapter";
+import { describeShapeFromExamples } from "./schemaHint";
 
 // JSON helpers
 const jsonSerializer = <T>(v: T) => JSON.stringify(v, null, 2);
@@ -56,10 +56,9 @@ const actorExamples: FewShotExample<ActorInput, ActorOutput>[] = [
     input: {
       goal: "Improve a log message.",
       userRequest: "Update the log and run tests.",
-      historySummary: "User wants a better log message; tests should still pass.",
-      filesInScope: [
-        { path: "app.ts", content: "console.log('Old');" },
-      ],
+      historySummary:
+        "User wants a better log message; tests should still pass.",
+      filesInScope: [{ path: "app.ts", content: "console.log('Old');" }],
       lastToolResults: [],
     },
     output: {
@@ -82,7 +81,10 @@ const actorExamples: FewShotExample<ActorInput, ActorOutput>[] = [
   },
 ];
 
-const historianExamples: FewShotExample<HistorianInput, HistorianOutput>[] = [
+const historianExamples: FewShotExample<
+  HistorianInput,
+  HistorianOutput
+>[] = [
   {
     input: {
       goal: "Improve a log message.",
@@ -130,7 +132,10 @@ const historianExamples: FewShotExample<HistorianInput, HistorianOutput>[] = [
 ];
 
 // Fake command runner (we don't actually run shell commands in this demo)
-async function fakeRunCommand(command: string, _cwd?: string): Promise<CommandResult> {
+async function fakeRunCommand(
+  command: string,
+  _cwd?: string
+): Promise<CommandResult> {
   return {
     kind: "command_result",
     command,
@@ -143,7 +148,9 @@ async function fakeRunCommand(command: string, _cwd?: string): Promise<CommandRe
 async function main() {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    console.error("OPENAI_API_KEY is not set. Please export it before running this demo.");
+    console.error(
+      "OPENAI_API_KEY is not set. Please export it before running this demo."
+    );
     process.exit(1);
   }
 
@@ -181,90 +188,51 @@ async function main() {
     },
   ];
 
-  const goal = "Improve the login logging message and ensure tests still pass.";
+  const goal =
+    "Improve the login logging message and ensure tests still pass.";
   const userRequest =
     "Update the console.log message in samples/Login.tsx to be more descriptive and run tests.";
   const initialHistorySummary =
     "Initial request: improve the login logging message in Login.tsx and ensure tests run.";
 
-  console.log("=== OpenAI Demo: agent-loop-llm-v2 ===");
+  console.log("=== OpenAI Demo with schema hints: agent-loop-llm ===");
   console.log("\n--- Initial Login.tsx ---\n");
   console.log(loginContent);
+
+  // Derive schema hints for outputs from examples
+  const actorOutputShapeHint = describeShapeFromExamples(
+    actorExamples.map((e) => e.output),
+    "ActorOutput"
+  );
+
+  const historianOutputShapeHint = describeShapeFromExamples(
+    historianExamples.map((e) => e.output),
+    "HistorianOutput"
+  );
 
   const actorBasePrompt = `
 You are the **Actor** in a coding loop.
 
-You receive JSON called ActorInput with fields:
-- goal: string
-- userRequest: string
-- historySummary: string (a compressed mission log)
-- filesInScope: FileSnapshot[]
-- lastToolResults: ActionResult[] | undefined
+You receive JSON called ActorInput and must respond with JSON called ActorOutput.
 
-Each FileSnapshot is:
-- path: string
-- content: string
-- language?: string
-- isPrimary?: boolean
+Your responsibilities:
+- Read goal, userRequest, historySummary, filesInScope, and lastToolResults.
+- Decide a sequence of actions to move the goal forward:
+  - file edits (especially to "samples/Login.tsx"),
+  - optionally a command to run tests (like "npm test").
+- Set nextExpected:
+  - "tool_results" if you want to see what happens when your actions are executed next.
+  - "done" ONLY if the goal is already fully satisfied.
+  - For this demo, you SHOULD normally choose "tool_results".
 
-Each ActionResult is either:
-- { "kind": "file_edit_result", "path": string, "applied": boolean, "error"?: string }
-or
-- { "kind": "command_result", "command": string, "exitCode": number | null, "stdout": string, "stderr": string }
+${actorOutputShapeHint}
 
-Your job:
-1. Read goal, userRequest, historySummary, and the filesInScope (especially "samples/Login.tsx").
-2. Decide a sequence of actions to move the goal forward:
-   - file edits to "samples/Login.tsx"
-   - optionally a command to run tests, like "npm test"
-3. Set nextExpected:
-   - "tool_results" if you want to see what happens when your actions are executed next.
-   - "done" ONLY if the goal is already fully satisfied.
-   - For this demo, you SHOULD normally choose "tool_results".
-
-You MUST respond with a JSON object matching ActorOutput:
-
-{
-  "stepSummary": string (short description of what you are trying this step),
-  "actions": AgentAction[],
-  "nextExpected": "user" | "tool_results" | "done"
-}
-
-Each AgentAction must be one of:
-
-1) Message to user:
-{
-  "kind": "message_to_user",
-  "message": string,
-  "messageType"?: "info" | "question" | "warning" | "error"
-}
-
-2) File edit:
-{
-  "kind": "file_edit",
-  "path": string,
-  "mode": "replace_file" | "replace_range",
-  "newContent"?: string,
-  "range"?: { "startOffset": number, "endOffset": number },
-  "rangeNewText"?: string,
-  "explanation"?: string
-}
-
-3) Command:
-{
-  "kind": "command",
-  "command": string,
-  "cwd"?: string,
-  "purpose"?: "run_tests" | "run_build" | "diagnostic" | "other"
-}
-
-For this demo:
-- Edit ONLY "samples/Login.tsx".
-- Prefer a single "file_edit" with mode "replace_file" to update the console.log message.
-- Optionally add one "command" action with command "npm test" and purpose "run_tests".
-- Set nextExpected to "tool_results" so you can see the results.
-- Do NOT include any extra fields outside the schema.
-- Output MUST be valid JSON, without comments or explanations.
+Rules:
+- Match the structure of the example ActorOutput objects shown in the few-shot examples.
+- Preserve the top-level keys.
+- Do NOT invent new top-level keys.
+- Use the same field names and compatible data types as in the example outputs.
+- Output MUST be valid JSON, with no comments or extra text.
   `.trim();
 
   const actorInput: ActorInput = {
@@ -280,19 +248,25 @@ For this demo:
     actorConfig,
     actorInput,
     actorExamples,
-    { temperature: 0, maxTokens: 512 },
+    { temperature: 0, maxTokens: 512 }
   );
 
   console.log("\n--- ActorOutput ---\n");
   console.log(JSON.stringify(actorOutput, null, 2));
 
   const { files: updatedFiles, results: actionResults } =
-    await executeActionsInMemory(filesInScope, actorOutput.actions, fakeRunCommand);
+    await executeActionsInMemory(
+      filesInScope,
+      actorOutput.actions,
+      fakeRunCommand
+    );
 
   filesInScope = updatedFiles;
 
   console.log("\n--- Updated Login.tsx ---\n");
-  const updatedLogin = filesInScope.find((f) => f.path === "samples/Login.tsx");
+  const updatedLogin = filesInScope.find(
+    (f) => f.path === "samples/Login.tsx"
+  );
   console.log(updatedLogin?.content ?? "(not found)");
 
   console.log("\n--- ActionResults ---\n");
@@ -303,34 +277,25 @@ For this demo:
   const historianBasePrompt = `
 You are the **Historian** in a coding loop.
 
-You receive JSON called HistorianInput with fields:
-- goal: string
-- previousHistorySummary: string
-- userTurn?: { "message": string }
-- actorTurn?: {
-    "stepSummary"?: string,
-    "actions": AgentAction[],
-    "nextExpected": "user" | "tool_results" | "done"
-  }
-- toolResults?: { "results": ActionResult[] }
+You receive JSON called HistorianInput and must respond with JSON called HistorianOutput.
 
 Your job:
 - Rewrite historySummary from scratch as a short mission log (max ~200 words).
 - Include:
-  - the goal,
+  - the overall goal,
   - what the user most recently requested,
   - what the Actor tried this step (from actions and stepSummary),
   - what worked and what failed (from toolResults),
   - current state or next direction if relevant.
-- Drop low-level noise (full file contents, long stack traces).
 
-You MUST respond with a JSON object:
+${historianOutputShapeHint}
 
-{
-  "historySummary": string
-}
-
-Do NOT include any additional fields. Output only valid JSON.
+Rules:
+- Match the structure of the example HistorianOutput objects shown in the few-shot examples.
+- Preserve the top-level keys.
+- Do NOT invent new top-level keys.
+- Always output a non-empty historySummary string.
+- Output MUST be valid JSON, with no comments or extra text.
   `.trim();
 
   const historianInput: HistorianInput = {
@@ -351,13 +316,13 @@ Do NOT include any additional fields. Output only valid JSON.
     historianConfig,
     historianInput,
     historianExamples,
-    { temperature: 0, maxTokens: 256 },
+    { temperature: 0, maxTokens: 256 }
   );
 
   console.log("\n--- New historySummary ---\n");
   console.log(historianOutput.historySummary);
 
-  console.log("\n=== OpenAI Demo complete ===");
+  console.log("\n=== OpenAI Demo with schema hints complete ===");
 }
 
 if (require.main === module) {
