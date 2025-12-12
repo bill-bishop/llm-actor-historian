@@ -11,7 +11,6 @@ import { ActorInput, ActorOutput } from "./actorTypes";
 import { HistorianInput, HistorianOutput } from "./historianTypes";
 import {
   LLMAdapter,
-  CompletionOptions,
   FewShotConfig,
   FewShotExample,
 } from "./llmAdapter";
@@ -26,7 +25,8 @@ import {
   makeValidationResult,
 } from "./validation";
 
-// JSON helpers re-used from other demos
+// ---------- JSON helpers ----------
+
 const jsonSerializer = <T>(v: T) => JSON.stringify(v, null, 2);
 const jsonParser = <T>(raw: string): T => {
   const trimmed = raw
@@ -53,7 +53,8 @@ const historianConfig: FewShotConfig<HistorianInput, HistorianOutput> = {
   outputLabel: "Output",
 };
 
-// Lightweight few-shot examples (same spirit as openai-demo)
+// ---------- Few-shot examples (same spirit as openai-demo) ----------
+
 const actorExamples: FewShotExample<ActorInput, ActorOutput>[] = [
   {
     input: {
@@ -134,6 +135,8 @@ const historianExamples: FewShotExample<
   },
 ];
 
+// ---------- Helpers ----------
+
 // Fake command runner (we don't actually run shell commands in this demo)
 async function fakeRunCommand(
   command: string,
@@ -146,6 +149,18 @@ async function fakeRunCommand(
     stdout: "All tests passed (simulated)",
     stderr: "",
   };
+}
+
+/**
+ * For this demo, we intentionally corrupt the first ActorOutput before
+ * validation to simulate a schema failure. In a real system the LLM might
+ * produce this kind of mistake naturally.
+ */
+function corruptActorOutputForDemo(output: ActorOutput): any {
+  const copy: any = JSON.parse(JSON.stringify(output));
+  // Remove nextExpected to trigger a validation error.
+  delete copy.nextExpected;
+  return copy;
 }
 
 async function main() {
@@ -195,213 +210,217 @@ async function main() {
     "Improve the login logging message and ensure tests still pass.";
   const userRequest =
     "Update the console.log message in samples/Login.tsx to be more descriptive and run tests.";
-  const initialHistorySummary =
+  let historySummary =
     "Initial request: improve the login logging message in Login.tsx and ensure tests run.";
+  let lastToolResults: ActionResult[] | undefined;
 
-  console.log("=== validation-demo (OpenAI): failed attempt -> corrected attempt ===");
+  console.log("=== validation-demo (realistic loop) ===");
   console.log("\n--- Initial Login.tsx ---\n");
   console.log(loginContent);
 
-  //
-  // 1) FIRST ACTOR ATTEMPT: deliberately invalid schema (missing nextExpected)
-  //
-  const actorPromptInvalid = `
-You are the **Actor** in a coding loop.
+  // Single, stable base prompt for the Actor across all attempts.
+  const actorBasePrompt = `
+You are the **Actor** in a coding loop for editing code and running tests.
 
-This is the FIRST attempt. For this first attempt ONLY, you MUST intentionally produce an INVALID ActorOutput JSON:
-- Use the field "nextStep" instead of "nextExpected" at the top level.
-- Otherwise follow the same structure as the example ActorOutput values.
+You receive an ActorInput JSON and must respond with an ActorOutput JSON.
 
-Do NOT explain or apologize. Output JSON only.
+ActorInput fields:
+- goal: overall objective for this session.
+- userRequest: most recent high-level request from the user.
+- historySummary: short narrative of what has happened so far.
+- filesInScope: current working set of files you are allowed to edit.
+- lastToolResults: (optional) ActionResult[] from the previous step
+  (e.g. validation failures, file edit results, command results).
+
+ActorOutput fields (as seen in the examples):
+- stepSummary: short description of what you will do this step.
+- actions: an array of actions to take in this step:
+  - file_edit
+  - command
+  - message_to_user
+  - add_file_to_scope (if available in the domain)
+- nextExpected: "user" | "tool_results" | "done"
+
+There is a schema validator sitting between you and the tools.
+If you produce an invalid ActorOutput (wrong field names, wrong types,
+missing required keys like nextExpected), the validator will emit a
+validation_result in the next step's lastToolResults, and your actions
+will NOT be executed.
+
+Your job on each step:
+1. Read goal, userRequest, historySummary, filesInScope, and lastToolResults.
+   - If lastToolResults contains a validation_result, carefully fix your
+     output structure so that validation will pass next time.
+2. Propose a small, coherent set of actions to move the goal forward.
+3. Set nextExpected:
+   - "tool_results" if you want to see the outcome of your actions.
+   - "done" only if the goal is fully satisfied.
+
+IMPORTANT:
+- Output ONLY JSON for ActorOutput, no extra commentary.
+- Match the structure of the ActorOutput examples exactly
+  (same top-level keys, same field names, compatible types).
   `.trim();
 
-  const actorInput1: ActorInput = {
-    goal,
-    userRequest,
-    historySummary: initialHistorySummary,
-    filesInScope,
-  };
-
-  const actorOutput1 = await runActorStep(
-    actorPromptInvalid,
-    actorLLM,
-    actorConfig,
-    actorInput1,
-    actorExamples,
-    { temperature: 0, maxTokens: 512 }
-  );
-
-  console.log("\n--- ActorOutput (first attempt, expected invalid) ---\n");
-  console.log(JSON.stringify(actorOutput1, null, 2));
-
-  const outcome1 = validateActorOutput(actorOutput1 as any);
-  const validationResult1 = makeValidationResult(
-    "actor",
-    outcome1,
-    JSON.stringify(actorOutput1).slice(0, 400)
-  );
-
-  console.log("\n--- ValidationOutcome (first attempt) ---\n");
-  console.log(outcome1);
-
-  console.log("\n--- ValidationResult (first attempt) ---\n");
-  console.log(JSON.stringify(validationResult1, null, 2));
-
-  //
-  // 2) SECOND ACTOR ATTEMPT: correct the schema based on validation failure
-  //
-  const correctionHint =
-    outcome1.ok
-      ? "Note: The previous attempt unexpectedly passed validation. Still, ensure your output remains valid."
-      : "The previous attempt FAILED validation because 'nextExpected' was missing or incorrect. You must fix this.";
-
-  const actorPromptCorrected = `
-You are the **Actor** in a coding loop.
-
-This is the SECOND attempt, after a failed schema validation of your previous ActorOutput.
-You are given:
-- goal, userRequest
-- an updated historySummary
-- lastToolResults that include a validation_result describing why the previous output was invalid.
-
-Your job now:
-- Produce a CORRECT ActorOutput JSON.
-- It MUST include a valid "nextExpected" field ("user" | "tool_results" | "done").
-- Its structure must match the example ActorOutput objects used in few-shot examples
-  (same top-level keys, same field names, compatible data types).
-- Choose actions that edit "samples/Login.tsx" and optionally run tests via a "command" action.
-
-${correctionHint}
-
-Rules:
-- Output ONLY valid JSON for ActorOutput.
-- Do not include explanations, comments, or extra fields.
-  `.trim();
-
-  const historyAfterFailure =
-    "The previous Actor attempt produced an invalid ActorOutput (schema validation failed). " +
-    "Now the Actor must fix the schema and move the goal forward.";
-
-  const actorInput2: ActorInput = {
-    goal,
-    userRequest,
-    historySummary: historyAfterFailure,
-    filesInScope,
-    lastToolResults: [validationResult1],
-  };
-
-  const actorOutput2 = await runActorStep(
-    actorPromptCorrected,
-    actorLLM,
-    actorConfig,
-    actorInput2,
-    actorExamples,
-    { temperature: 0, maxTokens: 512 }
-  );
-
-  console.log("\n--- ActorOutput (second attempt, expected corrected) ---\n");
-  console.log(JSON.stringify(actorOutput2, null, 2));
-
-  const outcome2 = validateActorOutput(actorOutput2 as any);
-  const validationResult2 = makeValidationResult(
-    "actor",
-    outcome2,
-    JSON.stringify(actorOutput2).slice(0, 400)
-  );
-
-  console.log("\n--- ValidationOutcome (second attempt) ---\n");
-  console.log(outcome2);
-
-  console.log("\n--- ValidationResult (second attempt) ---\n");
-  console.log(JSON.stringify(validationResult2, null, 2));
-
-  if (!outcome2.ok) {
-    console.log(
-      "\nSecond Actor attempt is still invalid. For this demo, we will not execute actions, " +
-        "but we will still let the Historian summarize both validation attempts."
-    );
-  }
-
-  //
-  // 3) Execute actions from the corrected attempt (if valid) and gather tool results
-  //
-  let actionResults: ActionResult[] = [validationResult1, validationResult2];
-
-  if (outcome2.ok) {
-    const { files: updatedFiles, results } = await executeActionsInMemory(
-      filesInScope,
-      actorOutput2.actions as AgentAction[],
-      fakeRunCommand
-    );
-    filesInScope = updatedFiles;
-    actionResults = [...actionResults, ...results];
-
-    console.log("\n--- Updated Login.tsx after corrected attempt ---\n");
-    const updatedLogin = filesInScope.find(
-      (f) => f.path === "samples/Login.tsx"
-    );
-    console.log(updatedLogin?.content ?? "(not found)");
-
-    console.log("\n--- ActionResults (second attempt) ---\n");
-    results.forEach((r: ActionResult, idx: number) => {
-      console.log(`Result ${idx + 1}:`, JSON.stringify(r, null, 2));
-    });
-  }
-
-  //
-  // 4) HISTORIAN: summarize the whole story (failed attempt + corrected attempt)
-  //
-  const historianPrompt = `
+  // Single, stable base prompt for the Historian across all attempts.
+  const historianBasePrompt = `
 You are the **Historian** in a coding loop.
 
-You receive:
+You receive a HistorianInput JSON and must respond with a HistorianOutput JSON.
+
+HistorianInput fields:
 - goal
-- previousHistorySummary that mentions there was a failed Actor schema validation
-- userTurn (what the user asked for)
-- actorTurn (the corrected ActorOutput from the second attempt)
-- toolResults: includes one or more validation_result entries and possibly file/command results
+- previousHistorySummary
+- userTurn
+- actorTurn
+- toolResults: ActionResult[] for the current step, which may include:
+  - file_edit_result
+  - command_result
+  - validation_result
+  - file_added_to_scope_result (if used in the domain)
 
 Your job:
-- Rewrite historySummary as a short mission log (~200 words or less).
-- Explicitly mention that the first Actor attempt failed schema validation.
-- Explicitly mention that the second Actor attempt produced a valid schema and what it changed.
-- Summarize any file edits and test runs that occurred.
-- Do NOT include raw JSON, stack traces, or long code snippets.
+- Rewrite historySummary from scratch as a short mission log (<= ~200 words),
+  including:
+  - the goal,
+  - the latest user request,
+  - what the Actor attempted this step (stepSummary + actions),
+  - what worked and what failed (from toolResults).
+- When you see a validation_result:
+  - Explicitly note that the Actor's previous output failed or passed validation,
+    and why that matters for the session.
 
-You MUST respond with a JSON object:
+You MUST respond with JSON of the shape:
 
 {
   "historySummary": string
 }
 
-Output only JSON, nothing else.
+Output only JSON, no extra commentary.
   `.trim();
 
-  const historianInput: HistorianInput = {
-    goal,
-    previousHistorySummary: historyAfterFailure,
-    userTurn: { message: userRequest },
-    actorTurn: {
-      stepSummary: actorOutput2.stepSummary,
-      actions: actorOutput2.actions as AgentAction[],
-      nextExpected: actorOutput2.nextExpected,
-    },
-    toolResults: { results: actionResults },
-  };
+  //
+  // Realistic loop: up to 2 attempts.
+  // Attempt 1: we intentionally corrupt the Actor output before validation
+  // to simulate a schema failure. Historian records that failure.
+  // Attempt 2: Actor sees lastToolResults + updated historySummary and
+  // produces a corrected output which we then execute.
+  //
 
-  const historianOutput = await runHistorianUpdate(
-    historianPrompt,
-    historianLLM,
-    historianConfig,
-    historianInput,
-    historianExamples,
-    { temperature: 0, maxTokens: 256 }
-  );
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    console.log(`\n=== Actor attempt ${attempt} ===`);
 
-  console.log("\n--- Final historySummary (after failure + correction) ---\n");
-  console.log(historianOutput.historySummary);
+    const actorInput: ActorInput = {
+      goal,
+      userRequest,
+      historySummary,
+      filesInScope,
+      lastToolResults,
+    };
 
-  console.log("\n=== validation-demo (OpenAI) complete ===");
+    const rawActorOutput = await runActorStep(
+      actorBasePrompt,
+      actorLLM,
+      actorConfig,
+      actorInput,
+      actorExamples,
+      { temperature: 0, maxTokens: 512 }
+    );
+
+    console.log("\n--- Raw ActorOutput ---\n");
+    console.log(JSON.stringify(rawActorOutput, null, 2));
+
+    // For attempt 1 only, corrupt the output to force a validation failure.
+    const outputForValidation: any =
+      attempt === 1 ? corruptActorOutputForDemo(rawActorOutput) : rawActorOutput;
+
+    const validationOutcome = validateActorOutput(outputForValidation);
+    const validationResult = makeValidationResult(
+      "actor",
+      validationOutcome,
+      JSON.stringify(outputForValidation).slice(0, 400)
+    );
+
+    console.log("\n--- ValidationOutcome ---\n");
+    console.log(validationOutcome);
+
+    console.log("\n--- ValidationResult ---\n");
+    console.log(JSON.stringify(validationResult, null, 2));
+
+    let stepToolResults: ActionResult[] = [validationResult];
+
+    // Only execute actions if validation passed.
+    if (validationOutcome.ok) {
+      const { files: updatedFiles, results } = await executeActionsInMemory(
+        filesInScope,
+        rawActorOutput.actions as AgentAction[],
+        fakeRunCommand
+      );
+      filesInScope = updatedFiles;
+      stepToolResults = [...stepToolResults, ...results];
+
+      console.log("\n--- Updated Login.tsx ---\n");
+      const updatedLogin = filesInScope.find(
+        (f) => f.path === "samples/Login.tsx"
+      );
+      console.log(updatedLogin?.content ?? "(not found)");
+
+      console.log("\n--- ActionResults ---\n");
+      results.forEach((r: ActionResult, idx: number) => {
+        console.log(`Result ${idx + 1}:`, JSON.stringify(r, null, 2));
+      });
+    } else {
+      console.log(
+        "\nValidation failed; actions will NOT be executed for this attempt."
+      );
+    }
+
+    // Historian summarizes this step, including validation result.
+    const historianInput: HistorianInput = {
+      goal,
+      previousHistorySummary: historySummary,
+      userTurn: { message: userRequest },
+      actorTurn: {
+        stepSummary: rawActorOutput.stepSummary,
+        actions: rawActorOutput.actions as AgentAction[],
+        nextExpected: rawActorOutput.nextExpected,
+      },
+      toolResults: { results: stepToolResults },
+    };
+
+    const historianOutput = await runHistorianUpdate(
+      historianBasePrompt,
+      historianLLM,
+      historianConfig,
+      historianInput,
+      historianExamples,
+      { temperature: 0, maxTokens: 256 }
+    );
+
+    historySummary = historianOutput.historySummary;
+    lastToolResults = stepToolResults;
+
+    console.log("\n--- Updated historySummary ---\n");
+    console.log(historySummary);
+
+    if (validationOutcome.ok) {
+      console.log(
+        "\nValidation passed on this attempt; demo loop will stop here."
+      );
+      break;
+    } else if (attempt === 1) {
+      console.log(
+        "\nValidation failed on attempt 1; proceeding to attempt 2 " +
+          "with updated historySummary + lastToolResults."
+      );
+    } else {
+      console.log(
+        "\nValidation still failing after the maximum number of attempts."
+      );
+    }
+  }
+
+  console.log("\n=== validation-demo (realistic loop) complete ===");
 }
 
 if (require.main === module) {
