@@ -507,6 +507,12 @@
           id="filesInput"
           placeholder="samples/Login.tsx&#10;samples/login.test.ts"
         ></textarea>
+        <div style="margin-top:0.35rem; display:flex; align-items:center; gap:0.4rem;">
+          <input type="checkbox" id="dryRunCheckbox" checked />
+          <label for="dryRunCheckbox" style="margin:0; font-size:0.78rem;">
+            Dry-run only (no real writes or commands)
+          </label>
+        </div>
         <small>
           Paths are resolved relative to the project root on the Node side.
         </small>
@@ -523,6 +529,10 @@
           <div class="sidebar-kv-row">
             <span class="label">Turns</span>
             <span class="value" id="turnCountValue">0</span>
+          </div>
+          <div class="sidebar-kv-row">
+            <span class="label">Mode</span>
+            <span class="value" id="modeValue">–</span>
           </div>
         </div>
         <div style="margin-top:0.4rem;">
@@ -565,8 +575,8 @@
           <strong>localhost</strong>
         </span>
         <span class="pill">
-          <span>LLMs:</span>
-          <strong>Actor + Historian</strong>
+          <span>Mode:</span>
+          <strong id="headerMode">–</strong>
         </span>
       </div>
     </header>

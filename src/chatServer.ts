@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import {
   FileSnapshot,
   AgentAction,
@@ -16,13 +17,14 @@ import {
   runActorStep,
   runHistorianUpdate,
 } from "./orchestrator";
-import { executeActionsInMemory } from "./executor";
+import {
+  executeActionsOnDisk,
+} from "./executor";
 import { OpenAIAdapter } from "./openAIAdapter";
 import {
   validateActorOutput,
   makeValidationResult,
 } from "./validation";
-import fs from "fs";
 
 const app = express();
 app.use(express.json());
@@ -50,6 +52,7 @@ interface ChatSession {
   filesInScope: FileSnapshot[];
   lastToolResults?: ActionResult[];
   turns: ChatTurn[];
+  dryRun: boolean;
 }
 
 const sessions = new Map<string, ChatSession>();
@@ -105,6 +108,28 @@ const actorExamples: FewShotExample<ActorInput, ActorOutput>[] = [
           kind: "command",
           command: "npm test",
           purpose: "run_tests",
+        },
+      ],
+      nextExpected: "tool_results",
+    },
+  },
+  {
+    // Demonstrates dynamic add_file_to_scope usage
+    input: {
+      goal: "Inspect a config file and summarize its contents.",
+      userRequest: "Figure out what's in config/app.json.",
+      historySummary:
+        "User wants a summary of config/app.json but it is not yet in scope.",
+      filesInScope: [],
+      lastToolResults: [],
+    },
+    output: {
+      stepSummary:
+        "Add config/app.json to scope so I can read and summarize it next.",
+      actions: [
+        {
+          kind: "add_file_to_scope",
+          path: "config/app.json",
         },
       ],
       nextExpected: "tool_results",
@@ -173,7 +198,8 @@ ActorInput fields:
 - historySummary: short narrative of what has happened so far.
 - filesInScope: current working set of files you are allowed to edit.
 - lastToolResults: (optional) ActionResult[] from the previous step
-  (e.g. validation failures, file edit results, command results).
+  (e.g. validation failures, file edit results, command results,
+   file_added_to_scope_result, etc).
 
 ActorOutput fields (as seen in the examples):
 - stepSummary: short description of what you will do this step.
@@ -181,7 +207,7 @@ ActorOutput fields (as seen in the examples):
   - file_edit
   - command
   - message_to_user
-  - add_file_to_scope (if available in the domain)
+  - add_file_to_scope
 - nextExpected: "user" | "tool_results" | "done"
 
 There is a schema validator sitting between you and the tools.
@@ -194,9 +220,18 @@ Your job on each step:
 1. Read goal, userRequest, historySummary, filesInScope, and lastToolResults.
    - If lastToolResults contains a validation_result, carefully fix your
      output structure so that validation will pass next time.
+   - If lastToolResults contains a file_added_to_scope_result, note whether
+     the file was successfully added and plan the next step accordingly.
 2. Propose a small, coherent set of actions to move the goal forward.
-3. Set nextExpected:
+3. Use actions:
+   - file_edit for concrete code edits in filesInScope.
+   - command for running tests or other shell commands.
+   - add_file_to_scope when you need to read or edit a file that is not
+     yet present in filesInScope (it will be loaded from disk if it exists).
+   - message_to_user when you need to ask the user something directly.
+4. Set nextExpected:
    - "tool_results" if you want to see the outcome of your actions.
+   - "user" if you expect the next step to be a user message.
    - "done" only if the goal is fully satisfied.
 
 IMPORTANT:
@@ -219,7 +254,7 @@ HistorianInput fields:
   - file_edit_result
   - command_result
   - validation_result
-  - file_added_to_scope_result (if used in the domain)
+  - file_added_to_scope_result
 
 Your job:
 - Rewrite historySummary from scratch as a short mission log (<= ~200 words),
@@ -231,6 +266,8 @@ Your job:
 - When you see a validation_result:
   - Explicitly note that the Actor's previous output failed or passed validation,
     and why that matters for the session.
+- When you see a file_added_to_scope_result:
+  - Note whether the file was successfully added to the working set or not.
 
 You MUST respond with JSON of the shape:
 
@@ -274,7 +311,6 @@ function loadInitialFiles(paths: string[]): FileSnapshot[] {
   for (const p of paths) {
     const abs = path.isAbsolute(p) ? p : path.join(projectRoot, p);
     if (!fs.existsSync(abs)) {
-      // Skip non-existent files; UI can still show them as "not found" if desired.
       continue;
     }
     const content = fs.readFileSync(abs, "utf8");
@@ -298,7 +334,7 @@ function createSessionId(): string {
 
 app.post("/api/session", (req, res) => {
   try {
-    const { goal, initialFiles } = req.body || {};
+    const { goal, initialFiles, dryRun } = req.body || {};
     if (!goal || typeof goal !== "string") {
       return res.status(400).json({ error: "goal (string) is required" });
     }
@@ -317,6 +353,7 @@ app.post("/api/session", (req, res) => {
       filesInScope,
       lastToolResults: undefined,
       turns: [],
+      dryRun: typeof dryRun === "boolean" ? dryRun : true,
     };
 
     sessions.set(sessionId, session);
@@ -355,6 +392,7 @@ app.post("/api/session/:id/user-turn", async (req, res) => {
     const historySummary = session.historySummary;
     const filesInScope = session.filesInScope;
     const lastToolResults = session.lastToolResults;
+    const dryRun = session.dryRun;
 
     const actorInput: ActorInput = {
       goal,
@@ -385,18 +423,12 @@ app.post("/api/session/:id/user-turn", async (req, res) => {
     let newFilesInScope = filesInScope;
 
     if (validationOutcome.ok) {
-      const { files, results } = await executeActionsInMemory(
+      const { files, results } = await executeActionsOnDisk(
         filesInScope,
         actorOutput.actions as AgentAction[],
-        async (command: string, _cwd?: string) => {
-          const result: ActionResult = {
-            kind: "command_result",
-            command,
-            exitCode: 0,
-            stdout: "[simulated] Command not actually executed.",
-            stderr: "",
-          } as any;
-          return result as any;
+        {
+          projectRoot,
+          dryRun,
         }
       );
       newFilesInScope = files;

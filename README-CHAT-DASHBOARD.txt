@@ -1,136 +1,127 @@
-This bundle introduces a *real* interactive chat dashboard and a small Node
-server that wires the Actor–Historian–Executor loop into a web UI.
+Updates: real execution & dynamic add_file_to_scope
+===================================================
 
-Files:
+This bundle extends the previous chat dashboard with:
+
+1) Real file edits + command execution (disk-backed executor).
+2) Dynamic add_file_to_scope support wired through the Actor, Executor,
+   Historian, and UI.
+3) A "Dry-run only" mode toggle in the UI and server, so you can choose
+   between safe simulation and live mutations.
+
+Files in this bundle:
 
 - src/chatServer.ts
-    - Express-based HTTP server that:
-        - Serves static assets from ./dashboard
-        - Exposes:
-            - POST /api/session
-                - body: { goal: string, initialFiles?: string[] }
-                - loads initial files from disk into filesInScope
-                - creates an in-memory ChatSession with:
-                    - goal
-                    - historySummary
-                    - filesInScope
-                    - turns[]
-            - GET /api/session/:id
-                - returns the full ChatSession JSON
-            - POST /api/session/:id/user-turn
-                - body: { message: string }
-                - runs one complete loop:
-                    - builds ActorInput
-                    - calls runActorStep (Actor LLM)
-                    - validates ActorOutput
-                    - if valid:
-                        - executeActionsInMemory (Executor)
-                    - builds HistorianInput
-                    - calls runHistorianUpdate (Historian LLM)
-                    - updates:
-                        - historySummary
-                        - lastToolResults
-                        - filesInScope
-                        - turns[]
-                - returns the updated ChatSession
+    - Now uses `executeActionsOnDisk` instead of the in-memory executor.
+    - Accepts `dryRun` in POST /api/session to control whether:
+        - file_edit writes to disk, and
+        - command actions actually run on your shell.
+    - The Actor has an extra few-shot example that demonstrates
+      `add_file_to_scope`.
+    - Historian prompt explicitly mentions `file_added_to_scope_result`.
+    - ChatSession now includes:
+        interface ChatSession {
+          ...
+          dryRun: boolean;
+        }
 
-    - To start the server:
-        - Ensure you have OPENAI_API_KEY set.
-        - Add a script such as:
-            "scripts": {
-              "chat-server": "ts-node src/chatServer.ts"
-            }
-          or compile with tsc and run node dist/chatServer.js.
-        - The server listens on PORT (env) or 4000 by default.
-        - Dashboard is served at:
-            http://localhost:4000/
+- src/executor.ts
+    - Provides two executors:
+
+      1) executeActionsInMemory(filesInScope, actions, runCommand)
+         - Purely in-memory:
+            - file_edit mutates `FileSnapshot[]` only.
+            - command uses injected `runCommand` and returns command_result.
+            - add_file_to_scope emits a file_added_to_scope_result with
+              added=false and a reason (no disk access).
+
+      2) executeActionsOnDisk(filesInScope, actions, options)
+         - Disk-backed execution:
+            - file_edit:
+                - Reads the current contents from:
+                    - filesInScope, or
+                    - disk (if not in scope).
+                - Applies:
+                    - replace_file, or
+                    - replace_range (line-based).
+                - Writes back to disk when dryRun === false.
+                - Updates FileSnapshot[] and returns file_edit_result
+                  with previousContent, newContent, and wroteToDisk.
+            - command:
+                - When dryRun === true:
+                    - Emits a simulated command_result.
+                - When dryRun === false:
+                    - Executes the command with child_process.exec,
+                      capturing stdout/stderr and exitCode.
+            - add_file_to_scope:
+                - If the file is already present in filesInScope:
+                    - Returns file_added_to_scope_result (added=true, reason).
+                - If the file exists on disk:
+                    - Reads it, pushes to FileSnapshot[], and reports added=true.
+                - If the file does not exist:
+                    - Emits added=false with a reason.
 
 - dashboard/chat-dashboard.html
+    - New controls:
+        - "Dry-run only (no real writes or commands)" checkbox in the
+          "New session" panel.
+        - A "Mode" row in the Session state panel.
+        - A "Mode" pill in the header.
+
 - dashboard/chat-dashboard.js
-    - A modern, aesthetic, **functional** chat UI for the loop.
+    - When creating a session, POST /api/session now sends:
+        { goal, initialFiles, dryRun }
+    - renderSession() displays the mode as:
+        - "Dry run (safe)"  or
+        - "Live (writes + commands)"
+      in both sidebar and header.
+    - The Executor card now:
+        - For file_edit_result:
+            - Shows "applied" + "(disk)" when wroteToDisk === true.
+            - Shows "(no disk write)" when wroteToDisk === false.
+        - For file_added_to_scope_result:
+            - Shows added / reason inline.
+    - Sidebar explains that files can come from initialFiles OR from
+      Actor-driven add_file_to_scope steps.
 
-    Features:
+Usage
+-----
 
-    1) New Session panel (left sidebar)
-       - Textarea for the session goal.
-       - Textarea for "files in scope" (one path per line), e.g.:
-            samples/Login.tsx
-            samples/login.test.ts
-       - Creates a session via POST /api/session.
+1) Drop these files over the existing ones in your repo:
+    - src/chatServer.ts
+    - src/executor.ts
+    - dashboard/chat-dashboard.html
+    - dashboard/chat-dashboard.js
 
-    2) Session State panel (left sidebar)
-       - Shows:
-            - Session ID
-            - Turn count
-            - Current historySummary (Historian's mission log)
-            - Latest filesInScope (from the Executor), rendered as a list.
+2) Ensure dependencies:
+    - express, @types/express
+    - child_process is built-in
 
-    3) Main Chat view (right side)
-       - For each turn:
-            - User bubble with the text you entered.
-            - Actor card:
-                - stepSummary
-                - actions list:
-                    - file_edit
-                    - command
-                    - message_to_user
-                    - add_file_to_scope
-                  rendered as labeled rows.
-            - Executor card:
-                - All ActionResult entries:
-                    - validation_result
-                    - file_edit_result
-                    - command_result
-                    - file_added_to_scope_result
-                  rendered as labeled rows.
-                - Collapsible sections for:
-                    - Long command stdout/stderr
-                    - Validation errors on failed validation_result
-            - Historian card:
-                - Step-level historySummary for that turn.
+3) Start the server (with OPENAI_API_KEY set), e.g.:
+    "scripts": {
+      "chat-server": "ts-node src/chatServer.ts"
+    }
 
-    4) Files-in-scope panel (bottom of main view)
-       - Shows the **latest** FileSnapshot set returned by the Executor.
-       - Each file has a "View" button that opens a modal:
-            - fullscreen overlay with:
-                - path
-                - full current content (monospace, scrollable).
-
-    5) Chat input bar
-       - Textarea for user messages (Enter to send, Shift+Enter for newline).
-       - "Send" button.
-       - Disabled until a session is created.
-
-Usage:
-
-1) Drop src/chatServer.ts into your src/ directory.
-2) Drop dashboard/chat-dashboard.html and dashboard/chat-dashboard.js
-   into a dashboard/ directory at the project root.
-3) Ensure your project already has:
-    - agentDomain.ts
-    - actorTypes.ts
-    - historianTypes.ts
-    - llmAdapter.ts
-    - orchestrator.ts
-    - executor.ts
-    - openAIAdapter.ts
-    - validation.ts
-   as per the previous bundles.
-4) Install express if you don't have it:
-    npm install express
-    npm install --save-dev @types/express
-5) Start the server:
-    - Set OPENAI_API_KEY.
-    - Run your chosen script (e.g. npm run chat-server).
-6) Open:
+4) Open:
     http://localhost:4000/
-   in your browser.
 
-You now have a **live chat loop** where you:
-- Define a goal and initial files-in-scope.
-- Send arbitrary user turns.
-- See, per turn:
-    - ActorInput / ActorOutput (visually summarized),
-    - validation + tool results from the Executor,
-    - Historian's updated story,
-    - and the latest file contents via the "Files in scope" panel.
+5) In the "New session" panel:
+    - Enter a goal.
+    - Specify initial files (optional).
+    - Choose:
+        - Dry-run only (safe): no disk writes, commands simulated.
+        - Uncheck to go Live: real writes + shell commands.
+    - Click "Start session".
+
+6) Type user messages and watch:
+    - Actor propose file_edit, command, add_file_to_scope.
+    - Executor apply those:
+        - Show file_edit_result / command_result / file_added_to_scope_result.
+    - Historian integrate the step into historySummary.
+    - Files-in-scope update dynamically as files are added from disk.
+
+This gives you a real, stepwise, **operational** loop with:
+- Live editing of your TypeScript/React/etc. files,
+- Optional real command execution (e.g., `npm test`),
+- Actor-driven dynamic scoping of files,
+- And a UI that surfaces all of it clearly with collapsible long outputs.

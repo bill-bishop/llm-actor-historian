@@ -1,10 +1,13 @@
 (function () {
   const goalInput = document.getElementById("goalInput");
   const filesInput = document.getElementById("filesInput");
+  const dryRunCheckbox = document.getElementById("dryRunCheckbox");
   const startSessionBtn = document.getElementById("startSessionBtn");
 
   const sessionIdValue = document.getElementById("sessionIdValue");
   const turnCountValue = document.getElementById("turnCountValue");
+  const modeValue = document.getElementById("modeValue");
+  const headerMode = document.getElementById("headerMode");
   const historySummaryEl = document.getElementById("historySummary");
   const filescopeList = document.getElementById("filescopeList");
 
@@ -24,6 +27,7 @@
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean);
+    const dryRun = !!dryRunCheckbox.checked;
 
     if (!goal) {
       alert("Please enter a goal for the session.");
@@ -37,7 +41,7 @@
       const res = await fetch("/api/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal, initialFiles: files }),
+        body: JSON.stringify({ goal, initialFiles: files, dryRun }),
       });
       if (!res.ok) {
         const text = await res.text();
@@ -110,6 +114,12 @@
     sessionIdValue.textContent = session.id || "–";
     turnCountValue.textContent = String(session.turns ? session.turns.length : 0);
 
+    const modeLabel = session.dryRun
+      ? "Dry run (safe)"
+      : "Live (writes + commands)";
+    modeValue.textContent = modeLabel;
+    headerMode.textContent = modeLabel;
+
     historySummaryEl.textContent = session.historySummary || "";
     if (!session.historySummary) {
       historySummaryEl.textContent =
@@ -138,18 +148,14 @@
       p.className = "small muted";
       p.style.margin = "0";
       p.textContent =
-        "No files in scope yet. You can include paths when creating the session.";
+        "No files in scope yet. You can include paths when creating the session, or let the Actor use add_file_to_scope.";
       filescopeList.appendChild(p);
     }
 
     renderChatLog(session.turns || []);
     renderFilesPanel(session.filesInScope || []);
 
-    if (scrollToBottom) {
-      chatLog.scrollTop = chatLog.scrollHeight;
-    } else {
-      chatLog.scrollTop = chatLog.scrollHeight;
-    }
+    chatLog.scrollTop = chatLog.scrollHeight;
   }
 
   function renderChatLog(turns) {
@@ -237,7 +243,7 @@
 
       actorCard.appendChild(actionsList);
 
-      // Validation + Tool results card (Historian gets separate card)
+      // Validation + Tool results card
       const resultsCard = document.createElement("div");
       resultsCard.className = "agent-card";
       resultsCard.innerHTML = `
@@ -258,7 +264,14 @@
           metaSpan.textContent = r.success ? "ok" : "failed";
         } else if (r.kind === "file_edit_result") {
           labelSpan.textContent = "file_edit_result → " + (r.path || "");
-          metaSpan.textContent = r.applied ? "applied" : "not applied";
+          const appliedLabel = r.applied ? "applied" : "not applied";
+          const diskLabel =
+            r.wroteToDisk === false
+              ? " (no disk write)"
+              : r.wroteToDisk
+              ? " (disk)"
+              : "";
+          metaSpan.textContent = appliedLabel + diskLabel;
         } else if (r.kind === "command_result") {
           labelSpan.textContent = "command_result";
           metaSpan.textContent =
@@ -286,7 +299,7 @@
 
       resultsCard.appendChild(resultsList);
 
-      // Collapsible long outputs: for each command_result and validation_result snippet
+      // Collapsible long outputs
       const longOutputDetails = document.createElement("div");
       for (const r of turn.toolResults || []) {
         if (r.kind === "command_result") {
@@ -337,7 +350,7 @@
       agentRow.appendChild(actorCard);
       agentRow.appendChild(resultsCard);
 
-      // Historian card below
+      // Historian card
       const historianCard = document.createElement("div");
       historianCard.className = "agent-card";
       historianCard.style.marginTop = "0.4rem";
