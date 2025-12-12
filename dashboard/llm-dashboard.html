@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>LLM Logs Dashboard</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 1rem 2rem;
+      background: #0b0c10;
+      color: #f5f5f5;
+    }
+    h1 {
+      font-size: 1.8rem;
+      margin-bottom: 0.5rem;
+    }
+    .controls {
+      margin-bottom: 1rem;
+    }
+    input[type="file"] {
+      margin-top: 0.5rem;
+    }
+    .summary {
+      margin: 1rem 0;
+      padding: 0.75rem 1rem;
+      background: #151720;
+      border-radius: 8px;
+      font-size: 0.9rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+    th,
+    td {
+      padding: 0.4rem 0.5rem;
+      border-bottom: 1px solid #2a2d3a;
+      vertical-align: top;
+    }
+    th {
+      text-align: left;
+      background: #151720;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    tr:hover {
+      background: #1f2230;
+      cursor: pointer;
+    }
+    .detail {
+      margin-top: 1rem;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+    .detail textarea {
+      width: 100%;
+      height: 260px;
+      background: #05060a;
+      color: #f5f5f5;
+      border-radius: 6px;
+      border: 1px solid #2a2d3a;
+      padding: 0.5rem;
+      font-family: monospace;
+      font-size: 0.8rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.1rem 0.4rem;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      background: #2a2d3a;
+    }
+    .badge.error {
+      background: #5c1c1c;
+    }
+    .badge.ok {
+      background: #185c2a;
+    }
+    .muted {
+      color: #9ca3af;
+      font-size: 0.8rem;
+    }
+    .small {
+      font-size: 0.75rem;
+    }
+    .nowrap {
+      white-space: nowrap;
+    }
+    .ellipsis {
+      max-width: 260px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  </style>
+</head>
+<body>
+  <h1>LLM Logs Dashboard</h1>
+  <p class="muted small">
+    Select one or more <code>llm-*.jsonl</code> files from your <code>logs/</code> directory.
+  </p>
+
+  <div class="controls">
+    <label>
+      Log files:
+      <input type="file" id="fileInput" multiple accept=".jsonl,.log,.txt" />
+    </label>
+  </div>
+
+  <div id="summary" class="summary" style="display: none;"></div>
+
+  <div
+    style="
+      max-height: 320px;
+      overflow: auto;
+      border-radius: 8px;
+      border: 1px solid #2a2d3a;
+    "
+  >
+    <table id="logsTable">
+      <thead>
+        <tr>
+          <th class="nowrap">Time</th>
+          <th>Adapter</th>
+          <th>Model</th>
+          <th class="nowrap">Tokens</th>
+          <th>Prompt</th>
+          <th>Completion</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div id="detail" class="detail" style="display: none;">
+    <div>
+      <div class="small muted">Prompt</div>
+      <textarea id="promptDetail" readonly></textarea>
+    </div>
+    <div>
+      <div class="small muted">Completion</div>
+      <textarea id="completionDetail" readonly></textarea>
+    </div>
+  </div>
+
+  <script src="llm-dashboard.js"></script>
+</body>
+</html>

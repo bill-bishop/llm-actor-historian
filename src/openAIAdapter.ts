@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { CompletionOptions, LLMAdapter } from "./llmAdapter";
+import { logLLMInteraction } from "./logging";
 
 export interface OpenAIAdapterConfig {
   apiKey?: string;
@@ -14,7 +15,7 @@ export class OpenAIAdapter implements LLMAdapter {
     const apiKey = config.apiKey ?? process.env.OPENAI_API_KEY;
     if (!apiKey) {
       throw new Error(
-          "OpenAIAdapter: OPENAI_API_KEY is not set and no apiKey was provided."
+        "OpenAIAdapter: OPENAI_API_KEY is not set and no apiKey was provided."
       );
     }
 
@@ -23,38 +24,83 @@ export class OpenAIAdapter implements LLMAdapter {
   }
 
   async complete(prompt: string, options?: CompletionOptions): Promise<string> {
-    const response = await this.client.chat.completions.create({
-      model: this.model,
-      messages: [{ role: "user", content: prompt }],
-      temperature: options?.temperature,
-      max_completion_tokens: options?.maxTokens,
-      stop: options?.stop,
-    });
+    const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const start = Date.now();
 
-    const choice = response.choices[0];
-    const content = choice.message?.content;
+    try {
+      const response = await this.client.chat.completions.create({
+        model: this.model,
+        messages: [{ role: "user", content: prompt }],
+        temperature: options?.temperature,
+        max_tokens: options?.maxTokens,
+        stop: options?.stop,
+      });
 
-    // If nothing came back, just return empty string
-    if (!content) {
-      return "";
+      const choice = response.choices[0];
+      const content = choice.message?.content;
+
+      let text: string;
+
+      if (!content) {
+        text = "";
+      } else if (typeof content === "string") {
+        text = content;
+      } else {
+        const parts = content as any[];
+        text = parts
+          .map((part: any) => {
+            if (typeof part === "string") return part;
+            if (typeof part?.text === "string") return part.text;
+            if (typeof part?.content === "string") return part.content;
+            return "";
+          })
+          .join("");
+      }
+
+      const usage = (response as any).usage;
+
+      logLLMInteraction({
+        timestamp: new Date().toISOString(),
+        adapterName: "OpenAIAdapter",
+        model: this.model,
+        runId,
+        prompt,
+        completion: text,
+        options,
+        usage: usage
+          ? {
+              promptTokens:
+                typeof usage.prompt_tokens === "number"
+                  ? usage.prompt_tokens
+                  : usage.promptTokens,
+              completionTokens:
+                typeof usage.completion_tokens === "number"
+                  ? usage.completion_tokens
+                  : usage.completionTokens,
+              totalTokens:
+                typeof usage.total_tokens === "number"
+                  ? usage.total_tokens
+                  : usage.totalTokens,
+            }
+          : undefined,
+        durationMs: Date.now() - start,
+      });
+
+      return text;
+    } catch (err: any) {
+      logLLMInteraction({
+        timestamp: new Date().toISOString(),
+        adapterName: "OpenAIAdapter",
+        model: this.model,
+        runId,
+        prompt,
+        completion: "",
+        options,
+        usage: undefined,
+        durationMs: Date.now() - start,
+        errorMessage: err?.message ?? String(err),
+      });
+      throw err;
     }
-
-    // Most models return a plain string
-    if (typeof content === "string") {
-      return content;
-    }
-
-    // Some models/SDK modes may return an array of "content parts"
-    // We defensively treat it as any[] and join whatever text we can find.
-    const parts = content as any[];
-
-    return parts
-        .map((part: any) => {
-          if (typeof part === "string") return part;
-          if (typeof part?.text === "string") return part.text;
-          if (typeof part?.content === "string") return part.content;
-          return "";
-        })
-        .join("");
   }
 }
