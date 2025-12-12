@@ -391,48 +391,78 @@ app.post("/api/session/:id/user-turn", async (req, res) => {
     const goal = session.goal;
     const historySummary = session.historySummary;
     const filesInScope = session.filesInScope;
-    const lastToolResults = session.lastToolResults;
+    const lastToolResultsFromSession = session.lastToolResults;
     const dryRun = session.dryRun;
+    const projectRootLocal = projectRoot;
 
-    const actorInput: ActorInput = {
+    // We'll allow the Actor a few attempts to fix bad schema
+    // before we give up and let the Historian log the failure.
+    const maxValidationAttempts = 3;
+
+    let actorInput: ActorInput = {
       goal,
       userRequest,
       historySummary,
       filesInScope,
-      lastToolResults,
+      lastToolResults: lastToolResultsFromSession,
     };
 
-    const actorOutput = await runActorStep(
-      actorBasePrompt,
-      actorLLM,
-      actorConfig,
-      actorInput,
-      actorExamples,
-      { temperature: 0, maxTokens: 768 }
-    );
-
-    const validationOutcome = validateActorOutput(actorOutput);
-    const validationResult = makeValidationResult(
-      "actor",
-      validationOutcome,
-      JSON.stringify(actorOutput).slice(0, 400)
-    );
-
-    let stepToolResults: ActionResult[] = [validationResult];
-
+    let actorOutput: ActorOutput | null = null;
+    let stepToolResults: ActionResult[] = [];
     let newFilesInScope = filesInScope;
+    let lastValidationOutcome: { ok: boolean; errors?: string[] } | null = null;
 
-    if (validationOutcome.ok) {
-      const { files, results } = await executeActionsOnDisk(
-        filesInScope,
-        actorOutput.actions as AgentAction[],
-        {
-          projectRoot,
-          dryRun,
-        }
+    for (let attempt = 0; attempt < maxValidationAttempts; attempt++) {
+      actorOutput = await runActorStep(
+        actorBasePrompt,
+        actorLLM,
+        actorConfig,
+        actorInput,
+        actorExamples,
+        { temperature: 0, maxTokens: 768 }
       );
-      newFilesInScope = files;
-      stepToolResults = [...stepToolResults, ...results];
+
+      const validationOutcome = validateActorOutput(actorOutput);
+      lastValidationOutcome = validationOutcome;
+      const validationResult = makeValidationResult(
+        "actor",
+        validationOutcome,
+        JSON.stringify(actorOutput).slice(0, 400)
+      );
+
+      // Record this attempt's validation_result so the Historian can see
+      // how many times the Actor struggled with schema.
+      stepToolResults.push(validationResult);
+
+      if (validationOutcome.ok) {
+        // Only once we have a valid schema do we actually execute tools.
+        const execResult = await executeActionsOnDisk(
+          newFilesInScope,
+          actorOutput.actions as AgentAction[],
+          {
+            projectRoot: projectRootLocal,
+            dryRun,
+          }
+        );
+        newFilesInScope = execResult.files;
+        stepToolResults.push(...execResult.results);
+        break;
+      }
+
+      // Prepare a new ActorInput that includes this validation failure
+      // so the Actor can correct its own schema next attempt.
+      actorInput = {
+        ...actorInput,
+        lastToolResults: [validationResult],
+      };
+    }
+
+    if (!actorOutput) {
+      // Extremely defensive: should never happen because we always
+      // attempt at least once above.
+      return res
+        .status(500)
+        .json({ error: "Actor did not produce any output" });
     }
 
     const historianInput: HistorianInput = {
@@ -460,12 +490,22 @@ app.post("/api/session/:id/user-turn", async (req, res) => {
     session.lastToolResults = stepToolResults;
     session.filesInScope = newFilesInScope;
 
+    // For the ChatTurn, we keep the final ActorInput (which may contain
+    // a validation_result in lastToolResults) and the final ActorOutput.
+    const finalValidationResult =
+      stepToolResults.find((r) => r.kind === "validation_result") ||
+      makeValidationResult(
+        "actor",
+        lastValidationOutcome || { ok: true },
+        "No explicit validation_result recorded."
+      );
+
     const turn: ChatTurn = {
       id: session.turns.length,
       userMessage: userRequest,
       actorInput,
       actorOutput,
-      validationResult,
+      validationResult: finalValidationResult as ActionResult,
       toolResults: stepToolResults,
       historianInput,
       historianOutput,
