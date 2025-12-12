@@ -1,0 +1,5 @@
+Add to your package.json "scripts":
+
+  "validation-demo": "npm run build && node dist/validation-demo.js"
+
+(make sure you already have: "build": "tsc", and "test": "jest")
