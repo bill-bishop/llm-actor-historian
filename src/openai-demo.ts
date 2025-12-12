@@ -17,9 +17,9 @@ import {
 } from "./llmAdapter";
 import {
   runActorStep,
-  executeActionsInMemory,
   runHistorianUpdate,
 } from "./orchestrator";
+import { executeActionsInMemory } from "./executor";
 import { OpenAIAdapter } from "./openAIAdapter";
 import { describeShapeFromExamples } from "./schemaHint";
 

@@ -1,11 +1,9 @@
-import * as fs from "fs";
-import * as path from "path";
-
+import express from "express";
+import path from "path";
 import {
   FileSnapshot,
   AgentAction,
   ActionResult,
-  CommandResult,
 } from "./agentDomain";
 import { ActorInput, ActorOutput } from "./actorTypes";
 import { HistorianInput, HistorianOutput } from "./historianTypes";
@@ -24,8 +22,39 @@ import {
   validateActorOutput,
   makeValidationResult,
 } from "./validation";
+import fs from "fs";
 
-// ---------- JSON helpers ----------
+const app = express();
+app.use(express.json());
+
+const projectRoot = path.join(__dirname, "..");
+
+// Serve static dashboard assets
+app.use(express.static(path.join(projectRoot, "dashboard")));
+
+interface ChatTurn {
+  id: number;
+  userMessage: string;
+  actorInput: ActorInput;
+  actorOutput: ActorOutput;
+  validationResult: ActionResult; // specifically ValidationResult
+  toolResults: ActionResult[];
+  historianInput: HistorianInput;
+  historianOutput: HistorianOutput;
+}
+
+interface ChatSession {
+  id: string;
+  goal: string;
+  historySummary: string;
+  filesInScope: FileSnapshot[];
+  lastToolResults?: ActionResult[];
+  turns: ChatTurn[];
+}
+
+const sessions = new Map<string, ChatSession>();
+
+// ---------- LLM + few-shot config ----------
 
 const jsonSerializer = <T>(v: T) => JSON.stringify(v, null, 2);
 const jsonParser = <T>(raw: string): T => {
@@ -52,8 +81,6 @@ const historianConfig: FewShotConfig<HistorianInput, HistorianOutput> = {
   inputLabel: "Input",
   outputLabel: "Output",
 };
-
-// ---------- Few-shot examples (same spirit as openai-demo) ----------
 
 const actorExamples: FewShotExample<ActorInput, ActorOutput>[] = [
   {
@@ -135,91 +162,7 @@ const historianExamples: FewShotExample<
   },
 ];
 
-// ---------- Helpers ----------
-
-// Fake command runner (we don't actually run shell commands in this demo)
-async function fakeRunCommand(
-  command: string,
-  _cwd?: string
-): Promise<CommandResult> {
-  return {
-    kind: "command_result",
-    command,
-    exitCode: 0,
-    stdout: "All tests passed (simulated)",
-    stderr: "",
-  };
-}
-
-/**
- * For this demo, we intentionally corrupt the first ActorOutput before
- * validation to simulate a schema failure. In a real system the LLM might
- * produce this kind of mistake naturally.
- */
-function corruptActorOutputForDemo(output: ActorOutput): any {
-  const copy: any = JSON.parse(JSON.stringify(output));
-  // Remove nextExpected to trigger a validation error.
-  delete copy.nextExpected;
-  return copy;
-}
-
-async function main() {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    console.error(
-      "OPENAI_API_KEY is not set. Please export it before running this demo."
-    );
-    process.exit(1);
-  }
-
-  const actorLLM: LLMAdapter = new OpenAIAdapter({
-    apiKey,
-    model: "gpt-4.1-mini",
-  });
-
-  const historianLLM: LLMAdapter = new OpenAIAdapter({
-    apiKey,
-    model: "gpt-4.1-mini",
-  });
-
-  const projectRoot = path.join(__dirname, "..");
-  const samplesDir = path.join(projectRoot, "samples");
-
-  const loginPath = path.join(samplesDir, "Login.tsx");
-  const loginTestPath = path.join(samplesDir, "login.test.ts");
-
-  const loginContent = fs.readFileSync(loginPath, "utf8");
-  const loginTestContent = fs.readFileSync(loginTestPath, "utf8");
-
-  let filesInScope: FileSnapshot[] = [
-    {
-      path: "samples/Login.tsx",
-      content: loginContent,
-      language: "tsx",
-      isPrimary: true,
-    },
-    {
-      path: "samples/login.test.ts",
-      content: loginTestContent,
-      language: "ts",
-      isPrimary: false,
-    },
-  ];
-
-  const goal =
-    "Improve the login logging message and ensure tests still pass.";
-  const userRequest =
-    "Update the console.log message in samples/Login.tsx to be more descriptive and run tests.";
-  let historySummary =
-    "Initial request: improve the login logging message in Login.tsx and ensure tests run.";
-  let lastToolResults: ActionResult[] | undefined;
-
-  console.log("=== validation-demo (realistic loop) ===");
-  console.log("\n--- Initial Login.tsx ---\n");
-  console.log(loginContent);
-
-  // Single, stable base prompt for the Actor across all attempts.
-  const actorBasePrompt = `
+const actorBasePrompt = `
 You are the **Actor** in a coding loop for editing code and running tests.
 
 You receive an ActorInput JSON and must respond with an ActorOutput JSON.
@@ -260,10 +203,9 @@ IMPORTANT:
 - Output ONLY JSON for ActorOutput, no extra commentary.
 - Match the structure of the ActorOutput examples exactly
   (same top-level keys, same field names, compatible types).
-  `.trim();
+`.trim();
 
-  // Single, stable base prompt for the Historian across all attempts.
-  const historianBasePrompt = `
+const historianBasePrompt = `
 You are the **Historian** in a coding loop.
 
 You receive a HistorianInput JSON and must respond with a HistorianOutput JSON.
@@ -297,18 +239,122 @@ You MUST respond with JSON of the shape:
 }
 
 Output only JSON, no extra commentary.
-  `.trim();
+`.trim();
 
-  //
-  // Realistic loop: up to 2 attempts.
-  // Attempt 1: we intentionally corrupt the Actor output before validation
-  // to simulate a schema failure. Historian records that failure.
-  // Attempt 2: Actor sees lastToolResults + updated historySummary and
-  // produces a corrected output which we then execute.
-  //
+// Instantiate LLMs once
+function makeActorLLM(): LLMAdapter {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is not set");
+  }
+  return new OpenAIAdapter({
+    apiKey,
+    model: "gpt-4.1-mini",
+  });
+}
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    console.log(`\n=== Actor attempt ${attempt} ===`);
+function makeHistorianLLM(): LLMAdapter {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is not set");
+  }
+  return new OpenAIAdapter({
+    apiKey,
+    model: "gpt-4.1-mini",
+  });
+}
+
+const actorLLM = makeActorLLM();
+const historianLLM = makeHistorianLLM();
+
+// ---------- Helpers ----------
+
+function loadInitialFiles(paths: string[]): FileSnapshot[] {
+  const snapshots: FileSnapshot[] = [];
+  for (const p of paths) {
+    const abs = path.isAbsolute(p) ? p : path.join(projectRoot, p);
+    if (!fs.existsSync(abs)) {
+      // Skip non-existent files; UI can still show them as "not found" if desired.
+      continue;
+    }
+    const content = fs.readFileSync(abs, "utf8");
+    snapshots.push({
+      path: p,
+      content,
+    });
+  }
+  return snapshots;
+}
+
+function createSessionId(): string {
+  return (
+    Date.now().toString(36) +
+    "-" +
+    Math.random().toString(36).slice(2, 8)
+  );
+}
+
+// ---------- Routes ----------
+
+app.post("/api/session", (req, res) => {
+  try {
+    const { goal, initialFiles } = req.body || {};
+    if (!goal || typeof goal !== "string") {
+      return res.status(400).json({ error: "goal (string) is required" });
+    }
+    const files: string[] = Array.isArray(initialFiles)
+      ? initialFiles.filter((p) => typeof p === "string")
+      : [];
+
+    const filesInScope = loadInitialFiles(files);
+    const sessionId = createSessionId();
+
+    const session: ChatSession = {
+      id: sessionId,
+      goal,
+      historySummary:
+        "Session started. No actions have been taken yet.",
+      filesInScope,
+      lastToolResults: undefined,
+      turns: [],
+    };
+
+    sessions.set(sessionId, session);
+
+    return res.json(session);
+  } catch (err: any) {
+    console.error("Error creating session", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/session/:id", (req, res) => {
+  const { id } = req.params;
+  const session = sessions.get(id);
+  if (!session) {
+    return res.status(404).json({ error: "Session not found" });
+  }
+  return res.json(session);
+});
+
+app.post("/api/session/:id/user-turn", async (req, res) => {
+  const { id } = req.params;
+  const session = sessions.get(id);
+  if (!session) {
+    return res.status(404).json({ error: "Session not found" });
+  }
+
+  const { message } = req.body || {};
+  if (!message || typeof message !== "string") {
+    return res.status(400).json({ error: "message (string) is required" });
+  }
+
+  try {
+    const userRequest = message;
+    const goal = session.goal;
+    const historySummary = session.historySummary;
+    const filesInScope = session.filesInScope;
+    const lastToolResults = session.lastToolResults;
 
     const actorInput: ActorInput = {
       goal,
@@ -318,72 +364,53 @@ Output only JSON, no extra commentary.
       lastToolResults,
     };
 
-    const rawActorOutput = await runActorStep(
+    const actorOutput = await runActorStep(
       actorBasePrompt,
       actorLLM,
       actorConfig,
       actorInput,
       actorExamples,
-      { temperature: 0, maxTokens: 512 }
+      { temperature: 0, maxTokens: 768 }
     );
 
-    console.log("\n--- Raw ActorOutput ---\n");
-    console.log(JSON.stringify(rawActorOutput, null, 2));
-
-    // For attempt 1 only, corrupt the output to force a validation failure.
-    const outputForValidation: any =
-      attempt === 1 ? corruptActorOutputForDemo(rawActorOutput) : rawActorOutput;
-
-    const validationOutcome = validateActorOutput(outputForValidation);
+    const validationOutcome = validateActorOutput(actorOutput);
     const validationResult = makeValidationResult(
       "actor",
       validationOutcome,
-      JSON.stringify(outputForValidation).slice(0, 400)
+      JSON.stringify(actorOutput).slice(0, 400)
     );
-
-    console.log("\n--- ValidationOutcome ---\n");
-    console.log(validationOutcome);
-
-    console.log("\n--- ValidationResult ---\n");
-    console.log(JSON.stringify(validationResult, null, 2));
 
     let stepToolResults: ActionResult[] = [validationResult];
 
-    // Only execute actions if validation passed.
+    let newFilesInScope = filesInScope;
+
     if (validationOutcome.ok) {
-      const { files: updatedFiles, results } = await executeActionsInMemory(
+      const { files, results } = await executeActionsInMemory(
         filesInScope,
-        rawActorOutput.actions as AgentAction[],
-        fakeRunCommand
+        actorOutput.actions as AgentAction[],
+        async (command: string, _cwd?: string) => {
+          const result: ActionResult = {
+            kind: "command_result",
+            command,
+            exitCode: 0,
+            stdout: "[simulated] Command not actually executed.",
+            stderr: "",
+          } as any;
+          return result as any;
+        }
       );
-      filesInScope = updatedFiles;
+      newFilesInScope = files;
       stepToolResults = [...stepToolResults, ...results];
-
-      console.log("\n--- Updated Login.tsx ---\n");
-      const updatedLogin = filesInScope.find(
-        (f) => f.path === "samples/Login.tsx"
-      );
-      console.log(updatedLogin?.content ?? "(not found)");
-
-      console.log("\n--- ActionResults ---\n");
-      results.forEach((r: ActionResult, idx: number) => {
-        console.log(`Result ${idx + 1}:`, JSON.stringify(r, null, 2));
-      });
-    } else {
-      console.log(
-        "\nValidation failed; actions will NOT be executed for this attempt."
-      );
     }
 
-    // Historian summarizes this step, including validation result.
     const historianInput: HistorianInput = {
       goal,
       previousHistorySummary: historySummary,
       userTurn: { message: userRequest },
       actorTurn: {
-        stepSummary: rawActorOutput.stepSummary,
-        actions: rawActorOutput.actions as AgentAction[],
-        nextExpected: rawActorOutput.nextExpected,
+        stepSummary: actorOutput.stepSummary,
+        actions: actorOutput.actions as AgentAction[],
+        nextExpected: actorOutput.nextExpected,
       },
       toolResults: { results: stepToolResults },
     };
@@ -394,39 +421,48 @@ Output only JSON, no extra commentary.
       historianConfig,
       historianInput,
       historianExamples,
-      { temperature: 0, maxTokens: 256 }
+      { temperature: 0, maxTokens: 512 }
     );
 
-    historySummary = historianOutput.historySummary;
-    lastToolResults = stepToolResults;
+    session.historySummary = historianOutput.historySummary;
+    session.lastToolResults = stepToolResults;
+    session.filesInScope = newFilesInScope;
 
-    console.log("\n--- Updated historySummary ---\n");
-    console.log(historySummary);
+    const turn: ChatTurn = {
+      id: session.turns.length,
+      userMessage: userRequest,
+      actorInput,
+      actorOutput,
+      validationResult,
+      toolResults: stepToolResults,
+      historianInput,
+      historianOutput,
+    };
 
-    if (validationOutcome.ok) {
-      console.log(
-        "\nValidation passed on this attempt; demo loop will stop here."
-      );
-      break;
-    } else if (attempt === 1) {
-      console.log(
-        "\nValidation failed on attempt 1; proceeding to attempt 2 " +
-          "with updated historySummary + lastToolResults."
-      );
-    } else {
-      console.log(
-        "\nValidation still failing after the maximum number of attempts."
-      );
-    }
+    session.turns.push(turn);
+
+    return res.json(session);
+  } catch (err: any) {
+    console.error("Error running user turn", err);
+    return res.status(500).json({ error: String(err) });
   }
+});
 
-  console.log("\n=== validation-demo (realistic loop) complete ===");
+// Fallback: serve dashboard by default at root
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(projectRoot, "dashboard", "chat-dashboard.html"));
+});
+
+export function startChatServer(port: number = 4000) {
+  app.listen(port, () => {
+    console.log(
+      `Chat server listening on http://localhost:${port} (dashboard at /)`
+    );
+  });
 }
 
+// If run directly: start the server.
 if (require.main === module) {
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
-  main().catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
+  const port = process.env.PORT ? Number(process.env.PORT) : 4000;
+  startChatServer(port);
 }

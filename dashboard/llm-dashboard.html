@@ -2,148 +2,615 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>LLM Logs Dashboard</title>
+  <title>LLM Session Inspector</title>
   <style>
+    :root {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      color-scheme: dark;
+    }
+    * {
+      box-sizing: border-box;
+    }
     body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      margin: 1rem 2rem;
-      background: #0b0c10;
-      color: #f5f5f5;
+      margin: 0;
+      background: radial-gradient(circle at top left, #1f2933, #05060a);
+      color: #f9fafb;
     }
-    h1 {
-      font-size: 1.8rem;
-      margin-bottom: 0.5rem;
+    .app {
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1.7fr) minmax(280px, 0.9fr);
+      grid-template-rows: auto minmax(0, 1fr);
+      grid-template-areas:
+        "header header header"
+        "sidebar main sidepanel";
+      height: 100vh;
     }
-    .controls {
-      margin-bottom: 1rem;
-    }
-    input[type="file"] {
-      margin-top: 0.5rem;
-    }
-    .summary {
-      margin: 1rem 0;
-      padding: 0.75rem 1rem;
-      background: #151720;
-      border-radius: 8px;
-      font-size: 0.9rem;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.85rem;
-    }
-    th,
-    td {
-      padding: 0.4rem 0.5rem;
-      border-bottom: 1px solid #2a2d3a;
-      vertical-align: top;
-    }
-    th {
-      text-align: left;
-      background: #151720;
+    header {
+      grid-area: header;
+      padding: 0.9rem 1.4rem;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      backdrop-filter: blur(16px);
+      background: linear-gradient(
+        to right,
+        rgba(15, 23, 42, 0.96),
+        rgba(15, 23, 42, 0.86)
+      );
       position: sticky;
       top: 0;
-      z-index: 1;
+      z-index: 10;
     }
-    tr:hover {
-      background: #1f2230;
-      cursor: pointer;
+    header h1 {
+      font-size: 1.1rem;
+      letter-spacing: 0.02em;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
     }
-    .detail {
-      margin-top: 1rem;
-      display: grid;
-      grid-template-columns: 1fr 1fr;
+    header h1 span.logo-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: radial-gradient(circle at 30% 30%, #38bdf8, #6366f1);
+      box-shadow: 0 0 18px rgba(96, 165, 250, 0.9);
+    }
+    header .header-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-size: 0.75rem;
+      color: #9ca3af;
+    }
+    header .pill {
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.4);
+      padding: 0.18rem 0.6rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      background: rgba(15, 23, 42, 0.8);
+    }
+    header .pill strong {
+      color: #e5e7eb;
+      font-weight: 500;
+    }
+
+    aside.sidebar {
+      grid-area: sidebar;
+      border-right: 1px solid rgba(31, 41, 55, 0.9);
+      padding: 0.9rem 0.8rem;
+      background: radial-gradient(circle at top, #020617, #020617);
+      display: flex;
+      flex-direction: column;
       gap: 0.75rem;
     }
-    .detail textarea {
-      width: 100%;
-      height: 260px;
-      background: #05060a;
-      color: #f5f5f5;
-      border-radius: 6px;
-      border: 1px solid #2a2d3a;
-      padding: 0.5rem;
-      font-family: monospace;
+    .sidebar-section {
+      background: rgba(15, 23, 42, 0.95);
+      border-radius: 0.9rem;
+      padding: 0.75rem 0.7rem;
+      border: 1px solid rgba(75, 85, 99, 0.5);
+      box-shadow: 0 18px 40px rgba(15, 23, 42, 0.7);
+    }
+    .sidebar-section h2 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: #9ca3af;
+      margin: 0 0 0.55rem;
+    }
+    .file-input-label {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
       font-size: 0.8rem;
+      color: #e5e7eb;
+    }
+    .file-input-label input[type="file"] {
+      font-size: 0.75rem;
+      color: #e5e7eb;
+    }
+    .summary-stat {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-size: 0.8rem;
+      margin-bottom: 0.32rem;
+    }
+    .summary-stat span.value {
+      font-weight: 600;
+      color: #e5e7eb;
+    }
+    .summary-stat span.label {
+      color: #9ca3af;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .summary-badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.3rem;
+      margin-top: 0.3rem;
     }
     .badge {
-      display: inline-block;
-      padding: 0.1rem 0.4rem;
+      display: inline-flex;
+      align-items: center;
       border-radius: 999px;
+      padding: 0.1rem 0.45rem;
       font-size: 0.7rem;
-      background: #2a2d3a;
-    }
-    .badge.error {
-      background: #5c1c1c;
-    }
-    .badge.ok {
-      background: #185c2a;
-    }
-    .muted {
-      color: #9ca3af;
-      font-size: 0.8rem;
-    }
-    .small {
-      font-size: 0.75rem;
-    }
-    .nowrap {
+      border: 1px solid rgba(148, 163, 184, 0.4);
+      background: rgba(15, 23, 42, 0.9);
+      color: #e5e7eb;
       white-space: nowrap;
     }
-    .ellipsis {
-      max-width: 260px;
+    .badge.error {
+      border-color: rgba(248, 113, 113, 0.7);
+      background: rgba(127, 29, 29, 0.9);
+    }
+    .badge.ok {
+      border-color: rgba(34, 197, 94, 0.6);
+      background: rgba(22, 101, 52, 0.9);
+    }
+
+    main {
+      grid-area: main;
+      padding: 0.9rem 0.6rem 1rem 0.4rem;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+    .chat-container {
+      border-radius: 1rem;
+      border: 1px solid rgba(55, 65, 81, 0.7);
+      background: radial-gradient(circle at top left, #020617, #020617);
+      box-shadow: 0 24px 60px rgba(15, 23, 42, 0.9);
+      padding: 0.6rem 0.8rem 0.5rem;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+    .chat-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.4rem;
+    }
+    .chat-header-title {
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: #e5e7eb;
+    }
+    .chat-header-sub {
+      font-size: 0.72rem;
+      color: #9ca3af;
+    }
+    .chat-list {
+      flex: 1;
+      overflow-y: auto;
+      padding-right: 0.3rem;
+      padding-top: 0.2rem;
+    }
+    .chat-item {
+      margin-bottom: 0.65rem;
+      border-radius: 0.9rem;
+      padding: 0.55rem 0.6rem;
+      background: linear-gradient(
+        to right,
+        rgba(15, 23, 42, 0.95),
+        rgba(15, 23, 42, 0.88)
+      );
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: border-color 0.12s ease, background-color 0.12s ease,
+        transform 0.08s ease;
+    }
+    .chat-item:hover {
+      border-color: rgba(59, 130, 246, 0.7);
+      transform: translateY(-1px);
+    }
+    .chat-item.selected {
+      border-color: rgba(129, 140, 248, 0.9);
+      box-shadow: 0 0 0 1px rgba(129, 140, 248, 0.5);
+    }
+    .chat-item-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 0.2rem;
+    }
+    .chat-item-meta {
+      display: flex;
+      gap: 0.4rem;
+      align-items: center;
+      font-size: 0.7rem;
+      color: #9ca3af;
+    }
+    .chat-item-meta span.time {
+      font-variant-numeric: tabular-nums;
+    }
+    .chat-item-meta span.model {
+      color: #e5e7eb;
+    }
+    .chat-item-tokens {
+      font-size: 0.7rem;
+      color: #9ca3af;
+    }
+    .chat-item-content {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 0.5rem;
+      margin-top: 0.35rem;
+    }
+    .chat-bubble {
+      border-radius: 0.6rem;
+      padding: 0.4rem 0.45rem;
+      font-size: 0.75rem;
+      line-height: 1.4;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(55, 65, 81, 0.7);
+      max-height: 5.4rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      position: relative;
+    }
+    .chat-bubble::after {
+      content: "";
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      height: 1.5rem;
+      background: linear-gradient(
+        to top,
+        rgba(15, 23, 42, 1),
+        rgba(15, 23, 42, 0)
+      );
+    }
+    .chat-bubble-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: #9ca3af;
+      margin-bottom: 0.18rem;
+    }
+    .chat-footer {
+      border-top: 1px solid rgba(31, 41, 55, 0.9);
+      padding-top: 0.35rem;
+      margin-top: 0.25rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.74rem;
+      color: #9ca3af;
+    }
+
+    .detail-panel {
+      margin-top: 0.4rem;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 0.4rem;
+      max-height: 270px;
+    }
+    .detail-block {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    .detail-block label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: #9ca3af;
+    }
+    .detail-block textarea {
+      flex: 1;
+      width: 100%;
+      resize: none;
+      border-radius: 0.6rem;
+      border: 1px solid rgba(55, 65, 81, 0.8);
+      background: #020617;
+      color: #e5e7eb;
+      font-size: 0.72rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+        "Liberation Mono", "Courier New", monospace;
+      padding: 0.45rem 0.5rem;
+    }
+
+    aside.sidepanel {
+      grid-area: sidepanel;
+      border-left: 1px solid rgba(31, 41, 55, 0.9);
+      padding: 0.9rem 0.9rem 0.9rem 0.6rem;
+      background: radial-gradient(circle at top, #020617, #020617);
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .sidepanel-section {
+      background: rgba(15, 23, 42, 0.96);
+      border-radius: 1rem;
+      padding: 0.7rem 0.75rem;
+      border: 1px solid rgba(55, 65, 81, 0.8);
+      box-shadow: 0 18px 40px rgba(15, 23, 42, 0.7);
+      font-size: 0.78rem;
+    }
+    .sidepanel-section h2 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: #9ca3af;
+      margin: 0 0 0.5rem;
+    }
+    .token-bars {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      margin-top: 0.1rem;
+    }
+    .token-bar-row {
+      display: flex;
+      flex-direction: column;
+      gap: 0.15rem;
+    }
+    .token-bar-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.72rem;
+      color: #e5e7eb;
+    }
+    .token-bar-track {
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(31, 41, 55, 0.9);
+      overflow: hidden;
+    }
+    .token-bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(to right, #22c55e, #38bdf8, #6366f1);
+      width: 0%;
+      transition: width 0.18s ease;
+    }
+
+    .filescope-list {
+      border-radius: 0.6rem;
+      border: 1px dashed rgba(75, 85, 99, 0.9);
+      padding: 0.4rem 0.45rem;
+      max-height: 140px;
+      overflow-y: auto;
+      font-size: 0.74rem;
+    }
+    .filescope-item {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      margin-bottom: 0.2rem;
+    }
+    .filescope-item input[type="checkbox"] {
+      width: 13px;
+      height: 13px;
+    }
+    .filescope-item span.path {
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .filescope-add {
+      margin-top: 0.35rem;
+      display: flex;
+      gap: 0.3rem;
+    }
+    .filescope-add input[type="text"] {
+      flex: 1;
+      border-radius: 999px;
+      border: 1px solid rgba(75, 85, 99, 0.9);
+      padding: 0.25rem 0.5rem;
+      background: #020617;
+      color: #e5e7eb;
+      font-size: 0.72rem;
+    }
+    .filescope-add button {
+      border-radius: 999px;
+      border: 1px solid rgba(129, 140, 248, 0.9);
+      background: linear-gradient(to right, #6366f1, #0ea5e9);
+      color: #f9fafb;
+      font-size: 0.72rem;
+      padding: 0.2rem 0.6rem;
+      cursor: pointer;
+    }
+    .filescope-add button:hover {
+      filter: brightness(1.08);
+    }
+
+    .muted {
+      color: #9ca3af;
+    }
+    .small {
+      font-size: 0.72rem;
+    }
+    .nowrap {
+      white-space: nowrap;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+        "Liberation Mono", "Courier New", monospace;
+    }
+
+    @media (max-width: 1100px) {
+      .app {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto auto minmax(0, 1fr) auto;
+        grid-template-areas:
+          "header"
+          "sidebar"
+          "main"
+          "sidepanel";
+        height: auto;
+      }
+      aside.sidebar {
+        border-right: none;
+        border-bottom: 1px solid rgba(31, 41, 55, 0.9);
+        flex-direction: row;
+        gap: 0.75rem;
+        overflow-x: auto;
+      }
+      .sidebar-section {
+        min-width: 240px;
+      }
+      aside.sidepanel {
+        border-left: none;
+        border-top: 1px solid rgba(31, 41, 55, 0.9);
+      }
+    }
   </style>
 </head>
 <body>
-  <h1>LLM Logs Dashboard</h1>
-  <p class="muted small">
-    Select one or more <code>llm-*.jsonl</code> files from your <code>logs/</code> directory.
-  </p>
+  <div class="app">
+    <header>
+      <h1>
+        <span class="logo-dot"></span>
+        LLM Session Inspector
+      </h1>
+      <div class="header-controls">
+        <span class="pill">
+          <span style="width:8px;height:8px;border-radius:999px;background:#22c55e;"></span>
+          <span>Logs loaded:</span>
+          <strong id="header-log-count">0</strong>
+        </span>
+        <span class="pill">
+          <span>Total tokens:</span>
+          <strong id="header-token-count">0</strong>
+        </span>
+      </div>
+    </header>
 
-  <div class="controls">
-    <label>
-      Log files:
-      <input type="file" id="fileInput" multiple accept=".jsonl,.log,.txt" />
-    </label>
-  </div>
+    <aside class="sidebar">
+      <section class="sidebar-section">
+        <h2>Load logs</h2>
+        <label class="file-input-label">
+          <span>Select one or more <span class="mono">llm-*.jsonl</span> files:</span>
+          <input type="file" id="fileInput" multiple accept=".jsonl,.log,.txt" />
+        </label>
+        <p class="muted small" style="margin-top:0.35rem;">
+          Logs are never uploaded; parsing happens entirely in your browser.
+        </p>
+      </section>
 
-  <div id="summary" class="summary" style="display: none;"></div>
+      <section class="sidebar-section">
+        <h2>Session summary</h2>
+        <div class="summary-stat">
+          <span class="label">Calls</span>
+          <span class="value" id="summary-calls">0</span>
+        </div>
+        <div class="summary-stat">
+          <span class="label">Models</span>
+          <span class="value" id="summary-models">0</span>
+        </div>
+        <div class="summary-stat">
+          <span class="label">Total tokens</span>
+          <span class="value" id="summary-tokens">0</span>
+        </div>
+        <div class="summary-stat">
+          <span class="label">Avg tokens/call</span>
+          <span class="value" id="summary-avg-tokens">0</span>
+        </div>
+        <div class="summary-badge-row" id="summary-errors-row">
+          <!-- badges injected here -->
+        </div>
+      </section>
+    </aside>
 
-  <div
-    style="
-      max-height: 320px;
-      overflow: auto;
-      border-radius: 8px;
-      border: 1px solid #2a2d3a;
-    "
-  >
-    <table id="logsTable">
-      <thead>
-        <tr>
-          <th class="nowrap">Time</th>
-          <th>Adapter</th>
-          <th>Model</th>
-          <th class="nowrap">Tokens</th>
-          <th>Prompt</th>
-          <th>Completion</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </div>
+    <main>
+      <section class="chat-container">
+        <div class="chat-header">
+          <div>
+            <div class="chat-header-title">Chat-like view of LLM calls</div>
+            <div class="chat-header-sub small">
+              Each row is one LLM completion: prompt on the left, completion on the right.
+            </div>
+          </div>
+          <div class="small muted">
+            Click a card to inspect the full prompt and completion.
+          </div>
+        </div>
 
-  <div id="detail" class="detail" style="display: none;">
-    <div>
-      <div class="small muted">Prompt</div>
-      <textarea id="promptDetail" readonly></textarea>
-    </div>
-    <div>
-      <div class="small muted">Completion</div>
-      <textarea id="completionDetail" readonly></textarea>
-    </div>
+        <div class="chat-list" id="chatList">
+          <!-- chat items injected here -->
+        </div>
+
+        <div class="detail-panel" id="detailPanel" style="display:none;">
+          <div class="detail-block">
+            <label>Prompt</label>
+            <textarea id="promptDetail" readonly></textarea>
+          </div>
+          <div class="detail-block">
+            <label>Completion</label>
+            <textarea id="completionDetail" readonly></textarea>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="sidepanel">
+      <section class="sidepanel-section">
+        <h2>Call tokens</h2>
+        <div class="small muted">
+          Focuses on the currently selected call, with relative bars for prompt,
+          completion, and total token counts (if present in logs).
+        </div>
+        <div class="token-bars" style="margin-top:0.45rem;">
+          <div class="token-bar-row">
+            <div class="token-bar-label">
+              <span>Prompt</span>
+              <span class="mono" id="token-prompt-count">0</span>
+            </div>
+            <div class="token-bar-track">
+              <div class="token-bar-fill" id="token-prompt-bar"></div>
+            </div>
+          </div>
+          <div class="token-bar-row">
+            <div class="token-bar-label">
+              <span>Completion</span>
+              <span class="mono" id="token-completion-count">0</span>
+            </div>
+            <div class="token-bar-track">
+              <div class="token-bar-fill" id="token-completion-bar"></div>
+            </div>
+          </div>
+          <div class="token-bar-row">
+            <div class="token-bar-label">
+              <span>Total</span>
+              <span class="mono" id="token-total-count">0</span>
+            </div>
+            <div class="token-bar-track">
+              <div class="token-bar-fill" id="token-total-bar"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="sidepanel-section">
+        <h2>Files in scope (manual)</h2>
+        <div class="small muted">
+          Use this space to mirror the files currently in scope for the
+          session you are inspecting. This is a local-only checklist, meant to
+          help you reason about what the Actor is seeing.
+        </div>
+        <div class="filescope-list" id="filescopeList">
+          <!-- file scope items -->
+        </div>
+        <div class="filescope-add">
+          <input
+            type="text"
+            id="filescopeInput"
+            placeholder="e.g. src/Login.tsx"
+          />
+          <button type="button" id="filescopeAddBtn">Add</button>
+        </div>
+      </section>
+    </aside>
   </div>
 
   <script src="llm-dashboard.js"></script>
